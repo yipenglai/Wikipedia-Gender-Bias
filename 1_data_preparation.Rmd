@@ -1,0 +1,172 @@
+---
+title: "Tutorial #1 Data Preparation"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+```{r, message=FALSE}
+# Initial setup
+library(dplyr)
+library(tidyr)
+library(quanteda)
+library(ggplot2)
+library(ggthemes)
+library(wesanderson)
+```
+
+In this tutorial, we will prepare the textual data for statistical analyses and modeling using the `quanteda` package. In order to manipulate the text into a format that can readily be analyzed, we will
+- Preprocess text as data
+- Construct token objects
+- Construct document-feature matrix (DFM)
+
+In addition, we will also select and count pronouns (e.g. he/she/they) to infer the gender of the biography subjects. 
+
+
+```{r}
+# Import data
+df_artist <- read.csv("data/artist.csv") %>% mutate(occupation = "artist")
+df_athlete <- read.csv("data/athlete.csv") %>% mutate(occupation = "athlete")
+df_scientist <- read.csv("data/scientist.csv") %>% mutate(occupation = "scientist")
+df_politician <- read.csv("data/politician.csv") %>% mutate(occupation = "politician")
+
+
+# Combine data into one data frame
+df_bio <- df_artist %>%
+  rbind(df_athlete) %>%
+  rbind(df_scientist) %>%
+  rbind(df_politician)
+
+# Check the first row
+head(df_bio, 1)
+```
+### 1. Gender Inference
+
+In order to infer the gender of each biography subject, we will count the occurrences of pronoun tokens observed in each biography document. 
+
+```{r}
+# Infer gender from biography text
+female_pronoun <- c("she", "her", "hers")
+male_pronoun <- c("he", "him", "his")
+collective_pronoun <- c("they", "them", "their", "theirs")
+
+# Select pronoun tokens
+token_pronoun <- tokens(df_bio$full_text) %>%
+  tokens_tolower %>%   # Convert tokens to lowercase
+  tokens_select(c(female_pronoun, male_pronoun, collective_pronoun)) # Select pronouns only
+
+# Check pronoun tokens from the first five documents
+token_pronoun[1:5]
+
+# Count pronoun frequency
+df_pronoun <- dfm(token_pronoun) %>%
+  convert("data.frame") %>%
+  mutate(name=df_bio$name)
+```
+
+We infer the gender of each biography subject based on the following rules:
+
+* IF # of third person plural pronouns is larger than that of female or male pronouns, we label the gender as `collective` assuming that the biography refers to a group or list of people.
+* ELSE IF the difference between the # of female and male pronouns is smaller than the sum of female and male pronouns, we label the gender as `unknown` assuming that the difference is too small to infer the subject gender. 
+* ELSE IF # of female pronouns is larger than that of male pronouns, we label it as `female`
+* ELSE we label it as `male`.
+
+```{r}
+# Infer gender based on pronoun frequency
+df_pronoun <- df_pronoun %>%
+  mutate(male = he+him,
+         female = she+her,
+         collective = they+them) %>%
+  mutate(gender = case_when(
+    collective >= male & collective >= female ~ "collective",
+    abs(male-female)/(male+female) < 0.25 ~ "unknown",
+    female > male ~ "female",
+    TRUE ~ "male"
+  ))
+# Check inferred gender of the first five documents
+df_pronoun %>%
+  select(doc_id, male, female, collective, gender) %>%
+  head()
+```
+
+Let's look at number of biographies as well as the length of biographies by gender and occupation.
+
+```{r}
+# Append gender and biography length (number of characters)
+df_bio$gender <- df_pronoun$gender
+df_bio$n_char <- nchar(df_bio$full_text)
+
+# Number of biographies by gender and occupation
+df_stat <- df_bio %>%
+  filter(gender != "unknown") %>%
+  group_by(occupation, gender) %>%
+  summarize(count = n()) %>%
+  mutate(perc_by_occupation = round(count*100/sum(count)))
+
+df_stat %>%
+  select(occupation, gender, count)
+
+# Visualize number of biographies by occupation and gender
+ggplot(data = df_stat, aes(x = occupation, y = perc_by_occupation, fill = gender)) +
+  geom_bar(stat="identity") +
+  geom_text(aes(label = paste0(perc_by_occupation, "%")),  
+            position = position_stack(vjust = 0.5), size = 4) +
+  scale_fill_manual(values=wes_palette(n = 3, name = "FantasticFox1")) + 
+  ylab("Percent of Biographies") +
+  xlab("Occupation") +
+  labs(fill = "Gender", title = "Percent of Biographies by Gender") +
+  theme_light() +
+  theme(legend.position = "bottom")
+
+```
+
+```{r}
+pal <- wes_palettes$FantasticFox1
+ggplot(data = df_bio %>% filter(gender %in% c("male", "female"))) +
+  geom_boxplot(aes(x = occupation, y = log(n_char), fill = gender)) +
+  scale_fill_manual(values=pal[2:3]) +
+  xlab("Occupation") +
+  ylab("Log(Number of Characters)") + 
+  labs(fill = "Gender", title = "Biography Length by Gender") +
+  theme_light() +
+  theme(legend.position = "bottom")
+```
+
+
+
+### 2. Preprocessing & tokenization
+
+In order to extract informative features, we can create token objects by removing separators (i.e. white spaces) and identifying words observed in each biography text. In addition, we can also apply different preprocessing techniques such as removing stopwords or common words in English, convert tokens to their stems of words and creating bi-gram in addition to unigram by using different built-in functions from `quanteda` package. 
+
+```{r}
+# Drop pronouns to prevent data leakage
+pronouns <- c("she", "She", "her", "Her", "hers", "Hers", "herself", "Herself",
+              "He", "he", "him", "Him", "his", "His", "himself", "Himself")
+
+token_bio <- tokens(df_bio$full_text,
+                 remove_numbers=TRUE,    # Remove numbers
+                 remove_symbols=TRUE,    # Remove symbols
+                 remove_punct=TRUE) %>%  # Remove punctuation
+  tokens_remove(pronouns) %>%            # Remove pronoun tokens
+  tokens_remove(stopwords("en")) %>%     # Remove stop words
+  tokens_tolower() %>%                   # Convert tokens to lowercase
+  tokens_wordstem() %>%                  # Apply stemmer
+  tokens_ngrams(n=1:2)                   # Use both unigram and bigram
+  
+# Check tokens from the first document
+token_bio[1]
+```
+
+### 3. Featurization
+
+We can featurize the textual data by creating a document-feature matrix (DFM), where each row presents one document (or one Wikipedia biography text in our example), and each column represents one feature or token. Each entry of the DFM represents the frequency of a given token observed in a given document. We can also use the `dfm_trim` function to remove features based on document and term frequency and reduce the matrix size. 
+
+```{r}
+gender_label <- df_bio$gender
+
+dfm_bio <- dfm(token_bio) %>%
+  dfm_trim(min_termfreq = 200, # Remove features observed in less than 200 times
+           min_docfreq = 200)  # Remove features observed in less than 200 documents
+```
+
