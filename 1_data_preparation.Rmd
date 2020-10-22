@@ -49,12 +49,12 @@ In order to infer the gender of each biography subject, we will count the occurr
 # Infer gender from biography text
 female_pronoun <- c("she", "her", "hers")
 male_pronoun <- c("he", "him", "his")
-collective_pronoun <- c("they", "them", "their", "theirs")
+others_pronoun <- c("they", "them", "their", "theirs")
 
 # Select pronoun tokens
 token_pronoun <- tokens(df_bio$full_text) %>%
   tokens_tolower %>%   # Convert tokens to lowercase
-  tokens_select(c(female_pronoun, male_pronoun, collective_pronoun)) # Select pronouns only
+  tokens_select(c(female_pronoun, male_pronoun, others_pronoun)) # Select pronouns only
 
 # Check pronoun tokens from the first five documents
 token_pronoun[1:5]
@@ -67,7 +67,7 @@ df_pronoun <- dfm(token_pronoun) %>%
 
 We infer the gender of each biography subject based on the following rules:
 
-* IF # of third person plural pronouns is larger than that of female or male pronouns, we label the gender as `collective` assuming that the biography refers to a group or list of people.
+* IF # of third person plural pronouns is larger than that of female or male pronouns, we label the gender as `others` assuming that the biography refers to a group or list of people or non-binary gender.
 * ELSE IF the difference between the # of female and male pronouns is smaller than the sum of female and male pronouns, we label the gender as `unknown` assuming that the difference is too small to infer the subject gender. 
 * ELSE IF # of female pronouns is larger than that of male pronouns, we label it as `female`
 * ELSE we label it as `male`.
@@ -77,16 +77,16 @@ We infer the gender of each biography subject based on the following rules:
 df_pronoun <- df_pronoun %>%
   mutate(male = he+him,
          female = she+her,
-         collective = they+them) %>%
+         others = they+them) %>%
   mutate(gender = case_when(
-    collective >= male & collective >= female ~ "collective",
+    others >= male & others >= female ~ "others",
     abs(male-female)/(male+female) < 0.25 ~ "unknown",
     female > male ~ "female",
     TRUE ~ "male"
   ))
 # Check inferred gender of the first five documents
 df_pronoun %>%
-  select(doc_id, male, female, collective, gender) %>%
+  select(doc_id, male, female, others, gender) %>%
   head()
 ```
 
@@ -108,7 +108,8 @@ df_stat %>%
   select(occupation, gender, count)
 
 # Visualize number of biographies by occupation and gender
-ggplot(data = df_stat, aes(x = occupation, y = perc_by_occupation, fill = gender)) +
+ggplot(data = df_stat, aes(x = occupation, y = perc_by_occupation, 
+                           fill = factor(df_stat$gender, levels = c("others", "female", "male")))) +
   geom_bar(stat="identity") +
   geom_text(aes(label = paste0(perc_by_occupation, "%")),  
             position = position_stack(vjust = 0.5), size = 4) +
@@ -169,4 +170,3 @@ dfm_bio <- dfm(token_bio) %>%
   dfm_trim(min_termfreq = 200, # Remove features observed in less than 200 times
            min_docfreq = 200)  # Remove features observed in less than 200 documents
 ```
-

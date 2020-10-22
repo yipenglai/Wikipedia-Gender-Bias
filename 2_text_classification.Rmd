@@ -1,0 +1,148 @@
+---
+title: "Tutorial #2 Text Classification"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE}
+# Initial setup
+library(dplyr)
+library(tidyr)
+library(quanteda)
+library(quanteda.textmodels)
+library(caret)
+library(PRROC)
+source("utils.R")
+set.seed(123)
+```
+
+In this tutorial, we will build a Bayes Naive classifier that can predict the gender of the biography subject using the biography about artists.
+
+```{r, message=FALSE}
+# Import data
+df_artist <- read.csv("data/artist.csv") %>%
+  # Infer gender using function created in utils.R
+  infer_pronouns() %>%
+  filter(gender %in% c("female", "male"))
+
+df_artist %>%
+  group_by(gender) %>%
+  summarize(count = n())
+```
+
+### 1. Create Training and Test Sets
+In order to evaluate the performance of the classification model, we will use 80% of the biography documents as training data for building the model and 25% as hold-out test data for evaluation. 
+
+addition, as women are highly underrepresented in Wikipedia biographies, we have an imbalanced dataset. We will downsample the training data, so when we train the Naive Bayes classifier, we have the same number of biographies of each gender. We will not downsample the test data. 
+
+```{r, message=FALSE}
+# Random sample training example by index
+train_ind <- createDataPartition(df_artist$gender,
+                                 p = 0.8,
+                                 list = FALSE,
+                                 times = 1)
+# Split into training and test sets
+df_train <- df_artist[train_ind,] %>% select(full_text, gender)
+df_test <- df_artist[-train_ind,] %>% select(full_text, gender)
+
+# Downsample training set
+df_train <- downSample(x = df_train$full_text,
+                       y = as.factor(df_train$gender),
+                       list = FALSE,
+                       yname = "gender")
+df_train %>%
+  group_by(gender) %>%
+  summarize(count = n())
+
+df_test %>%
+  group_by(gender) %>%
+  summarize(count = n())
+```
+
+### 2. Train and Evaluate Classification Model
+When we construct the document-feature matrices (DFM) for training and test documents separately, these two DFMs may contain different sets of features. For example, some words observed in the training documents may not appear in the test documents. When we use the `predict` function from quanteda with `force=TRUE`, the function will use features that are observed in the training data to make prediction for the test data. As a result, we only need to filter tokens by doc frequency and term frequency when constructing the training DFM.
+
+To evaluate model performance, for each biography we can compute its probability of being a biography about a female subject by setting `type='probability'` in the `predict()` function.
+```{r, message=FALSE}
+# Create DFMs
+pronouns <- c("she", "She", "her", "Her", "hers", "Hers", "herself", "Herself",
+              "He", "he", "him", "Him", "his", "His", "himself", "Himself")
+
+dfm_train <- create_dfm(df_train %>% mutate(full_text = as.character(x)),
+                        drop_tokens = pronouns,
+                        min_docfreq = 50,
+                        min_termfreq = 50)
+dfm_test <- create_dfm(df_test,
+                       drop_tokens = pronouns)
+  
+# Train Naive Bayes classifier
+model <- textmodel_nb(dfm_train, df_train$gender, smooth = 1)
+
+# Predict probability for test documents
+prob <- predict(model,
+                newdata = dfm_test, 
+                force = TRUE, # Use the same set of features from training
+                type = "probability")
+
+# Check predictions made for the first 10 test documents
+prob[1:10, ]
+```
+Next, we can label the top 20% documents with the highest probabilities (i.e. probability higher than the 80th percentile) as biographies about female subjects.
+
+```{r}
+# Label the document as female if
+# the predicted probability is higher than 80 percentile
+percentile <- quantile(prob[, 1], 0.8)
+pred <- ifelse(prob[,1] >= percentile, "female", "male")
+
+# Check predicted label for the first 10 test documents
+pred[1:10]
+```
+
+We can use recall and precision to evaluate the model, since we have imbalanced data. 
+- Precision: Among all documents predicted to be biographies about female subjects, how many are correct prediction?
+- Recall: Among actual biographies about female, how many do we predict correctly?
+
+In addition, we will compare the precision and recall of our models with those of the random-guess, no-skill baseline.
+- Precision baseline: Number of Biographies about Female in Test Data / Number of Biographies in Test Data
+- Recall baseline: 0.2 since we only label 20% of the test documents as biographies about female. 
+
+
+```{r}
+# Evaluate model performance
+# Baseline: no-skill precision
+df_test %>%
+  group_by(gender) %>%
+  summarize(perc = n()/nrow(df_test))
+
+# Construct confusion matrix
+cmat <- table(df_test$gender, pred)
+acc <- sum(diag(cmat))/sum(cmat)
+recall <- cmat[1,1]/sum(cmat[1,])
+precision <- cmat[1,1]/sum(cmat[,1])
+f1 <- 2*precision*recall/(precision+recall)
+cat(
+  "Accuracy:",  acc, "\n",
+  "Recall:",  recall, "\n",
+  "Precision:",  precision, "\n",
+  "F1 measure", f1, "\n"
+)
+```
+
+### 3. Find the Most Predictive Terms
+Finally, we can compute the posterior probability for each feature/term. The posterior probability measure the probability of the document being a biography about female/male given that we have observed a given word. 
+```{r}
+# Compute posterior
+param <- model$param
+prior <- model$prior
+posterior <- colNorm(param * base::outer(prior, rep(1, ncol(param))))
+# Format table
+posterior <- data.table::transpose(as.data.frame(posterior))
+rownames(posterior) <- colnames(param)
+colnames(posterior) <- rownames(param)
+# Get top predictive terms
+cat("Top predictive terms for female:", "\n",
+    posterior %>% arrange(desc(female)) %>% head(10) %>% rownames(), "\n",
+    "Top predictive terms for male:", "\n",
+    posterior %>% arrange(desc(male)) %>% head(10) %>% rownames(), "\n")
+
+```
